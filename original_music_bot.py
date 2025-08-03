@@ -12,6 +12,10 @@ import os
 import tempfile
 import threading
 import time
+import functools
+import subprocess
+import socket
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables (skip if .env has issues)
@@ -318,6 +322,20 @@ current_sources = {}
 cleanup_queue = {}  # Maps guild_id -> source awaiting cleanup
 ffmpeg_monitor = {}  # Maps guild_id -> FFmpeg process monitoring info
 
+def require_voice_connection():
+    """Decorator to require bot to be in voice channel before executing command"""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            # First argument should be ctx (context)
+            ctx = args[0] if args else kwargs.get('ctx')
+            if not ctx.guild.voice_client:
+                await ctx.send("❌ I need to be summoned first! Use `!summon` to bring me to your voice channel.")
+                return
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
+
 def schedule_ffmpeg_cleanup(guild_id, source):
     """Schedule cleanup after FFmpeg process terminates"""
     cleanup_queue[guild_id] = source
@@ -409,12 +427,35 @@ async def on_ready():
     # Clean up any leftover temp files from previous runs
     cleanup_temp_files()
     
-    # Sync slash commands
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} slash commands")
-    except Exception as e:
-        print(f"❌ Failed to sync commands: {e}")
+    print("🎮 Commands ready! Use !summon first, then !commands to see all available commands")
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Track voice state changes for debugging"""
+    # Only track our bot's voice state changes
+    if member == bot.user:
+        if before.channel != after.channel:
+            if after.channel:
+                print(f"🔊 Bot joined voice channel: {after.channel.name}")
+            elif before.channel:
+                print(f"👋 Bot left voice channel: {before.channel.name}")
+            else:
+                print(f"🔄 Bot voice state changed")
+        
+        # Additional debugging info
+        if after.channel:
+            print(f"🔍 Voice state - Self deaf: {after.self_deaf}, Self mute: {after.self_mute}")
+            print(f"🔍 Voice state - Server deaf: {after.deaf}, Server mute: {after.mute}")
+
+@bot.event  
+async def on_disconnect():
+    """Track when bot disconnects from Discord"""
+    print("🔌 Bot disconnected from Discord")
+
+@bot.event
+async def on_resumed():
+    """Track when bot reconnects to Discord"""
+    print("🔌 Bot reconnected to Discord")
 
 def cleanup_temp_files():
     """Clean up any leftover temporary files with persistence"""
@@ -451,35 +492,25 @@ def cleanup_temp_files():
     except Exception as e:
         print(f"⚠️ Error during temp file cleanup: {e}")
 
-@bot.tree.command(name="play", description="Play music from YouTube")
-async def play(interaction: discord.Interaction, search: str):
+@bot.command(name="play", help="Play music from YouTube")
+@require_voice_connection()
+async def play(ctx: commands.Context, *, search: str):
     """Play music from YouTube with enhanced quality and pre-buffering"""
     
     # Check if user is in voice channel
-    if not interaction.user.voice:
-        await interaction.response.send_message("❌ You need to be in a voice channel!", ephemeral=True)
-        return
-
-    # Defer immediately to prevent timeout
-    try:
-        await interaction.response.defer()
-    except discord.errors.NotFound:
-        # Interaction expired, can't respond
-        print("⚠️ Interaction expired before we could defer")
-        return
-    except Exception as e:
-        print(f"⚠️ Failed to defer interaction: {e}")
+    if not ctx.author.voice:
+        await ctx.send("❌ You need to be in a voice channel!")
         return
 
     try:
         # Get voice channel and connect
-        voice_channel = interaction.user.voice.channel
+        voice_channel = ctx.author.voice.channel
         
-        if interaction.guild.voice_client is None:
+        if ctx.guild.voice_client is None:
             voice_client = await voice_channel.connect()
             print(f"🔊 Connected to voice channel: {voice_channel.name}")
         else:
-            voice_client = interaction.guild.voice_client
+            voice_client = ctx.guild.voice_client
 
         # Stop current playback and cleanup if playing
         if voice_client.is_playing() or voice_client.is_paused():
@@ -491,7 +522,7 @@ async def play(interaction: discord.Interaction, search: str):
         source = await YTDLSource.create_source(search, loop=bot.loop, use_prebuffer=True)
         
         # Track current source for cleanup
-        current_sources[interaction.guild.id] = source
+        current_sources[ctx.guild.id] = source
 
         # Validate source before playing (with more lenient file size check)
         if hasattr(source, 'temp_file') and source.temp_file:
@@ -517,7 +548,7 @@ async def play(interaction: discord.Interaction, search: str):
             print(f"🎵 Starting playback...")
             voice_client.play(
                 source, 
-                after=lambda e: after_playing(e, interaction.guild.id, source)
+                after=lambda e: after_playing(e, ctx.guild.id, source)
             )
             
             # Verify playback started
@@ -525,13 +556,13 @@ async def play(interaction: discord.Interaction, search: str):
             if voice_client.is_playing():
                 duration_str = f" • {source.duration//60}:{source.duration%60:02d}" if source.duration else ""
                 try:
-                    await interaction.followup.send(f"🎵 **Now playing:** {source.title}{duration_str}")
+                    await ctx.send(f"🎵 **Now playing:** {source.title}{duration_str}")
                 except discord.errors.NotFound:
                     print("⚠️ Interaction expired, but playback started successfully")
                 print(f"✅ Successfully started: {source.title}")
             else:
                 try:
-                    await interaction.followup.send(f"❌ Failed to start playback. Trying direct stream...")
+                    await ctx.send(f"❌ Failed to start playback. Trying direct stream...")
                 except discord.errors.NotFound:
                     print("⚠️ Interaction expired during retry attempt")
                 print("⚠️ Playback failed to start, retrying with direct stream")
@@ -541,22 +572,22 @@ async def play(interaction: discord.Interaction, search: str):
                     source.cleanup()
                 
                 source = await YTDLSource.create_source(search, loop=bot.loop, use_prebuffer=False)
-                current_sources[interaction.guild.id] = source
+                current_sources[ctx.guild.id] = source
                 voice_client.play(
                     source, 
-                    after=lambda e: after_playing(e, interaction.guild.id, source)
+                    after=lambda e: after_playing(e, ctx.guild.id, source)
                 )
                 
                 await asyncio.sleep(0.5)
                 if voice_client.is_playing():
                     try:
-                        await interaction.followup.send(f"🎵 **Now playing:** {source.title} (direct stream)")
+                        await ctx.send(f"🎵 **Now playing:** {source.title} (direct stream)")
                     except discord.errors.NotFound:
                         print("⚠️ Interaction expired, but direct stream started successfully")
                     print(f"✅ Direct stream success: {source.title}")
                 else:
                     try:
-                        await interaction.followup.send(f"❌ Unable to play this track")
+                        await ctx.send(f"❌ Unable to play this track")
                     except discord.errors.NotFound:
                         print("⚠️ Interaction expired during error response")
                     print("💥 Both pre-buffer and direct stream failed")
@@ -564,51 +595,53 @@ async def play(interaction: discord.Interaction, search: str):
         except Exception as play_error:
             print(f"💥 Play error: {play_error}")
             try:
-                await interaction.followup.send(f"❌ Playback error: {str(play_error)}")
+                await ctx.send(f"❌ Playback error: {str(play_error)}")
             except discord.errors.NotFound:
                 print("⚠️ Interaction expired during play error response")
 
     except Exception as e:
         try:
-            await interaction.followup.send(f"❌ Error playing music: {str(e)}")
+            await ctx.send(f"❌ Error playing music: {str(e)}")
         except discord.errors.NotFound:
             print("⚠️ Interaction expired during error response")
         print(f"💥 Error: {str(e)}")
         
         # Cleanup on error
-        guild_id = interaction.guild.id
+        guild_id = ctx.guild.id
         if guild_id in current_sources:
             source = current_sources[guild_id]
             if hasattr(source, 'cleanup'):
                 source.cleanup()
             current_sources.pop(guild_id, None)
 
-@bot.tree.command(name="stop", description="Stop music and disconnect")
-async def stop(interaction: discord.Interaction):
-    """Stop music and disconnect with cleanup"""
+@bot.command(name="stop", help="Stop the current song")
+@require_voice_connection()
+async def stop(ctx: commands.Context):
+    """Stop current song but stay in voice channel"""
     try:
-        guild_id = interaction.guild.id
+        guild_id = ctx.guild.id
         
-        if interaction.guild.voice_client:
+        if ctx.guild.voice_client:
             # Stop playback and cleanup
-            if interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused():
-                interaction.guild.voice_client.stop()
-            
-            # Manual cleanup if needed
-            if guild_id in current_sources:
-                source = current_sources[guild_id]
-                if hasattr(source, 'cleanup'):
-                    source.cleanup(guild_id)
-                # Use pop() instead of del to avoid KeyError if already removed
-                current_sources.pop(guild_id, None)
-            
-            # Clean up any pending FFmpeg monitoring
-            cleanup_queue.pop(guild_id, None)
-            
-            await interaction.guild.voice_client.disconnect()
-            await interaction.response.send_message("⏹️ Stopped and disconnected!")
+            if ctx.guild.voice_client.is_playing() or ctx.guild.voice_client.is_paused():
+                ctx.guild.voice_client.stop()
+                
+                # Manual cleanup if needed
+                if guild_id in current_sources:
+                    source = current_sources[guild_id]
+                    if hasattr(source, 'cleanup'):
+                        source.cleanup(guild_id)
+                    # Use pop() instead of del to avoid KeyError if already removed
+                    current_sources.pop(guild_id, None)
+                
+                # Clean up any pending FFmpeg monitoring
+                cleanup_queue.pop(guild_id, None)
+                
+                await ctx.send("⏹️ Stopped the current song!")
+            else:
+                await ctx.send("❌ No music is currently playing.")
         else:
-            await interaction.response.send_message("❌ Not connected to voice channel.")
+            await ctx.send("❌ Not connected to voice channel.")
             
     except discord.errors.HTTPException as e:
         if e.code == 40060:  # Interaction already acknowledged
@@ -620,59 +653,390 @@ async def stop(interaction: discord.Interaction):
     except Exception as e:
         print(f"💥 Error in stop command: {e}")
         try:
-            await interaction.response.send_message(f"❌ Error stopping: {str(e)}")
+            await ctx.send(f"❌ Error stopping: {str(e)}")
         except:
             print("⚠️ Could not send error response for stop command")
 
-@bot.tree.command(name="pause", description="Pause the music")
-async def pause(interaction: discord.Interaction):
+@bot.command(name="kill", help="Disconnect the bot from voice channel")
+async def kill(ctx: commands.Context):
+    """Disconnect the bot from voice channel"""
+    try:
+        guild_id = ctx.guild.id
+        
+        if ctx.guild.voice_client:
+            # Stop any current playback first
+            if ctx.guild.voice_client.is_playing() or ctx.guild.voice_client.is_paused():
+                ctx.guild.voice_client.stop()
+            
+            # Manual cleanup if needed
+            if guild_id in current_sources:
+                source = current_sources[guild_id]
+                if hasattr(source, 'cleanup'):
+                    source.cleanup(guild_id)
+                current_sources.pop(guild_id, None)
+            
+            # Clean up any pending FFmpeg monitoring
+            cleanup_queue.pop(guild_id, None)
+            
+            # Disconnect from voice channel
+            await ctx.guild.voice_client.disconnect()
+            await ctx.send("👋 Disconnected from voice channel!")
+        else:
+            await ctx.send("❌ Not connected to voice channel.")
+            
+    except Exception as e:
+        print(f"💥 Error in kill command: {e}")
+        try:
+            await ctx.send(f"❌ Error disconnecting: {str(e)}")
+        except:
+            print("⚠️ Could not send error response for kill command")
+
+@bot.command(name="commands", help="Show all available commands")
+async def commands_list(ctx: commands.Context):
+    """Show all available commands"""
+    help_embed = discord.Embed(
+        title="🎵 Gondor Music Bot Commands",
+        description="⚠️ **Important:** Use `!summon` first to bring me to your voice channel!\n\nYour advanced Discord music bot with event-driven cleanup!",
+        color=0x00ff00
+    )
+    
+    help_embed.add_field(
+        name="🎶 Music Commands (Require !summon first)",
+        value=(
+            "`!play <search or url>` - Play music from YouTube\n"
+            "`!pause` - Pause the current song\n"
+            "`!resume` - Resume playback\n"
+            "`!stop` - Stop current song (bot stays in channel)"
+        ),
+        inline=False
+    )
+    
+    help_embed.add_field(
+        name="🔧 Control Commands", 
+        value=(
+            "`!summon` - Summon bot to your voice channel\n"
+            "`!kill` - Disconnect bot from voice channel 💀\n"
+            "`!commands` - Show this commands list"
+        ),
+        inline=False
+    )
+    
+    help_embed.add_field(
+        name="✨ Features",
+        value=(
+            "• **Pre-buffering** for smooth playback\n"
+            "• **Event-driven cleanup** system\n"
+            "• **High-quality audio** (Opus preferred)\n"
+            "• **Smart file management** on Windows"
+        ),
+        inline=False
+    )
+    
+    help_embed.set_footer(text="Use !commands to see this message anytime • Made with ❤️")
+    
+    try:
+        await ctx.send(embed=help_embed)
+    except Exception as e:
+        # Fallback to plain text if embeds don't work
+        help_text = """
+🎵 **Gondor Music Bot Commands**
+
+⚠️ **Important:** Use `!summon` first to bring me to your voice channel!
+
+**🎶 Music Commands (Require !summon first):**
+`!play <search or url>` - Play music from YouTube
+`!pause` - Pause the current song
+`!resume` - Resume playback
+`!stop` - Stop current song (bot stays in channel)
+
+**🔧 Control Commands:**
+`!summon` - Summon bot to your voice channel
+`!kill` - Disconnect bot from voice channel 💀
+`!commands` - Show this commands list
+
+**✨ Features:** Pre-buffering, Event-driven cleanup, High-quality audio
+        """
+        await ctx.send(help_text)
+
+@bot.command(name="pause", help="Pause the music")
+@require_voice_connection()
+async def pause(ctx: commands.Context):
     """Pause the music"""
-    if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
-        interaction.guild.voice_client.pause()
-        await interaction.response.send_message("⏸️ Music paused!")
+    if ctx.guild.voice_client and ctx.guild.voice_client.is_playing():
+        ctx.guild.voice_client.pause()
+        await ctx.send("⏸️ Music paused!")
     else:
-        await interaction.response.send_message("❌ No music playing.")
+        await ctx.send("❌ No music playing.")
 
-@bot.tree.command(name="resume", description="Resume the music")
-async def resume(interaction: discord.Interaction):
+@bot.command(name="resume", help="Resume the music")
+@require_voice_connection()
+async def resume(ctx: commands.Context):
     """Resume the music"""
-    if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
-        interaction.guild.voice_client.resume()
-        await interaction.response.send_message("▶️ Music resumed!")
+    if ctx.guild.voice_client and ctx.guild.voice_client.is_paused():
+        ctx.guild.voice_client.resume()
+        await ctx.send("▶️ Music resumed!")
     else:
-        await interaction.response.send_message("❌ Music is not paused.")
+        await ctx.send("❌ Music is not paused.")
 
-@bot.tree.command(name="summon", description="Summon the bot to your voice channel")
-async def summon(interaction: discord.Interaction):
-    """Summon the bot to your voice channel"""
+@bot.command(name="summon", help="Summon the bot to your voice channel")
+async def summon(ctx: commands.Context):
+    """Summon the bot to your voice channel with Windows-optimized connection"""
     
     # Check if user is in voice channel
-    if not interaction.user.voice:
-        await interaction.response.send_message("❌ You need to be in a voice channel to summon me!", ephemeral=True)
+    if not ctx.author.voice:
+        await ctx.send("❌ You need to be in a voice channel to summon me!")
         return
     
-    user_voice_channel = interaction.user.voice.channel
+    user_voice_channel = ctx.author.voice.channel
+    
+    # Clean up any existing broken connections first
+    if ctx.guild.voice_client:
+        try:
+            if not ctx.guild.voice_client.is_connected():
+                print("🧹 Cleaning up broken voice connection...")
+                await ctx.guild.voice_client.disconnect(force=True)
+                await asyncio.sleep(1)  # Wait for cleanup
+        except Exception as cleanup_e:
+            print(f"🧹 Cleanup error (ignoring): {cleanup_e}")
     
     try:
         # If bot is not connected to any voice channel
-        if interaction.guild.voice_client is None:
-            voice_client = await user_voice_channel.connect()
-            await interaction.response.send_message(f"🔊 **Summoned!** Joined `{user_voice_channel.name}`")
-            print(f"🔊 Summoned to voice channel: {user_voice_channel.name}")
+        if ctx.guild.voice_client is None:
+            connecting_msg = await ctx.send(f"🔄 Connecting to `{user_voice_channel.name}`...")
+            
+            # Windows-specific connection with timeout and retry logic
+            connection_timeout = 10  # seconds
+            max_attempts = 3
+            
+            for attempt in range(max_attempts):
+                try:
+                    print(f"🔄 Connection attempt {attempt + 1}/{max_attempts}")
+                    
+                    # Create connection with Windows-specific options
+                    voice_client = await asyncio.wait_for(
+                        user_voice_channel.connect(
+                            timeout=connection_timeout,
+                            reconnect=True,  # Enable automatic reconnection
+                            self_deaf=False,  # Ensure not deafened
+                            self_mute=False   # Ensure not muted
+                        ),
+                        timeout=connection_timeout + 5
+                    )
+                    
+                    print(f"🔊 Voice client created: {voice_client}")
+                    print(f"🔊 Connected to: {voice_client.channel.name if voice_client.channel else 'Unknown'}")
+                    print(f"🔊 Is connected: {voice_client.is_connected()}")
+                    
+                    # Extended wait and stability check
+                    print("⏳ Checking connection stability...")
+                    await asyncio.sleep(3)
+                    
+                    # Multiple stability checks
+                    stable = True
+                    for check in range(3):
+                        await asyncio.sleep(1)
+                        if not (ctx.guild.voice_client and ctx.guild.voice_client.is_connected()):
+                            stable = False
+                            print(f"❌ Stability check {check + 1} failed")
+                            break
+                        else:
+                            print(f"✅ Stability check {check + 1} passed")
+                    
+                    if stable:
+                        await connecting_msg.edit(content=f"🔊 **Successfully joined** `{user_voice_channel.name}`! Connection stable.")
+                        print(f"✅ Stable connection established to: {user_voice_channel.name}")
+                        return
+                    else:
+                        print(f"⚠️ Connection unstable on attempt {attempt + 1}")
+                        if ctx.guild.voice_client:
+                            await ctx.guild.voice_client.disconnect(force=True)
+                        await asyncio.sleep(2)  # Wait before retry
+                        
+                except asyncio.TimeoutError:
+                    print(f"⏰ Connection timeout on attempt {attempt + 1}")
+                    if ctx.guild.voice_client:
+                        try:
+                            await ctx.guild.voice_client.disconnect(force=True)
+                        except:
+                            pass
+                    await asyncio.sleep(2)
+                    
+                except Exception as attempt_e:
+                    print(f"💥 Connection error on attempt {attempt + 1}: {attempt_e}")
+                    if ctx.guild.voice_client:
+                        try:
+                            await ctx.guild.voice_client.disconnect(force=True)
+                        except:
+                            pass
+                    await asyncio.sleep(2)
+            
+            # If we get here, all attempts failed - try alternative method
+            print("🔄 Trying alternative connection method...")
+            try:
+                # Alternative connection method for problematic networks
+                voice_client = await user_voice_channel.connect(timeout=30)
+                
+                # Don't check stability, just accept the connection
+                await connecting_msg.edit(content=f"🔊 **Connected** to `{user_voice_channel.name}` (alternative method)")
+                print(f"✅ Alternative connection successful to: {user_voice_channel.name}")
+                return
+                
+            except Exception as alt_e:
+                print(f"💥 Alternative connection failed: {alt_e}")
+                await connecting_msg.edit(content=f"❌ **All connection methods failed** for `{user_voice_channel.name}`. This may be a network/firewall issue.")
+                print(f"❌ All connection methods failed for: {user_voice_channel.name}")
         
         # If bot is connected but to a different channel
-        elif interaction.guild.voice_client.channel != user_voice_channel:
-            await interaction.guild.voice_client.move_to(user_voice_channel)
-            await interaction.response.send_message(f"🔊 **Moved!** Now in `{user_voice_channel.name}`")
+        elif ctx.guild.voice_client.channel != user_voice_channel:
+            await ctx.guild.voice_client.move_to(user_voice_channel)
+            await ctx.send(f"🔊 **Moved!** Now in `{user_voice_channel.name}`")
             print(f"🔊 Moved to voice channel: {user_voice_channel.name}")
         
         # If bot is already in the same channel
         else:
-            await interaction.response.send_message(f"✅ I'm already in `{user_voice_channel.name}`!")
+            # Double-check connection status
+            if ctx.guild.voice_client.is_connected():
+                await ctx.send(f"✅ I'm already in `{user_voice_channel.name}`!")
+            else:
+                await ctx.send(f"⚠️ I think I'm in `{user_voice_channel.name}` but connection seems broken. Try `!kill` then `!summon` again.")
+                print(f"⚠️ Voice client exists but is not connected in: {user_voice_channel.name}")
             
     except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to join voice channel: {str(e)}")
+        await ctx.send(f"❌ Failed to join voice channel: {str(e)}")
         print(f"💥 Summon error: {str(e)}")
+        print(f"💥 Error type: {type(e).__name__}")
+        
+        # Additional debugging info
+        try:
+            print(f"🔍 Guild voice client: {ctx.guild.voice_client}")
+            if ctx.guild.voice_client:
+                print(f"🔍 Voice client channel: {ctx.guild.voice_client.channel}")
+                print(f"🔍 Voice client connected: {ctx.guild.voice_client.is_connected()}")
+        except Exception as debug_e:
+            print(f"🔍 Debug error: {debug_e}")
+
+@bot.command(name="diagnose", help="Run diagnostics to check bot functionality")
+async def diagnose(ctx):
+    """Run diagnostic tests"""
+    
+    embed = discord.Embed(title="🔧 Bot Diagnostics", color=0x00ff00)
+    
+    # Check FFmpeg
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            ffmpeg_version = result.stdout.split('\n')[0]
+            embed.add_field(name="FFmpeg", value=f"✅ {ffmpeg_version[:50]}...", inline=False)
+        else:
+            embed.add_field(name="FFmpeg", value="❌ FFmpeg not working properly", inline=False)
+    except FileNotFoundError:
+        embed.add_field(name="FFmpeg", value="❌ FFmpeg not installed or not in PATH", inline=False)
+    except subprocess.TimeoutExpired:
+        embed.add_field(name="FFmpeg", value="❌ FFmpeg timeout", inline=False)
+    except Exception as e:
+        embed.add_field(name="FFmpeg", value=f"❌ FFmpeg error: {str(e)}", inline=False)
+    
+    # Check voice client status
+    if ctx.guild.voice_client:
+        if ctx.guild.voice_client.is_connected():
+            embed.add_field(name="Voice Connection", value=f"✅ Connected to {ctx.guild.voice_client.channel.name}", inline=False)
+        else:
+            embed.add_field(name="Voice Connection", value="⚠️ Voice client exists but not connected", inline=False)
+    else:
+        embed.add_field(name="Voice Connection", value="❌ Not connected to voice", inline=False)
+    
+    # Check permissions
+    permissions = ctx.guild.me.guild_permissions
+    voice_perms = []
+    if permissions.connect:
+        voice_perms.append("✅ Connect")
+    else:
+        voice_perms.append("❌ Connect")
+        
+    if permissions.speak:
+        voice_perms.append("✅ Speak")
+    else:
+        voice_perms.append("❌ Speak")
+        
+    if permissions.use_voice_activation:
+        voice_perms.append("✅ Voice Activity")
+    else:
+        voice_perms.append("❌ Voice Activity")
+    
+    embed.add_field(name="Voice Permissions", value="\n".join(voice_perms), inline=False)
+    
+    # Check if user is in voice
+    if ctx.author.voice:
+        embed.add_field(name="User Voice Status", value=f"✅ In {ctx.author.voice.channel.name}", inline=False)
+    else:
+        embed.add_field(name="User Voice Status", value="❌ Not in voice channel", inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name="nettest", help="Test network connectivity to Discord voice servers")
+async def network_test(ctx):
+    """Test network connectivity to Discord voice servers"""
+    
+    embed = discord.Embed(title="🌐 Network Connectivity Test", color=0xff9900)
+    
+    # Test DNS resolution for Discord voice servers
+    try:
+        # Test DNS resolution for common Discord voice endpoints
+        test_hosts = [
+            "discord.gg",
+            "gateway.discord.gg", 
+            "media.discordapp.net"
+        ]
+        
+        dns_results = []
+        for host in test_hosts:
+            try:
+                ip = socket.gethostbyname(host)
+                dns_results.append(f"✅ {host} → {ip}")
+            except socket.gaierror:
+                dns_results.append(f"❌ {host} → DNS Failed")
+        
+        embed.add_field(name="DNS Resolution", value="\n".join(dns_results), inline=False)
+        
+    except Exception as e:
+        embed.add_field(name="DNS Resolution", value=f"❌ DNS test failed: {str(e)}", inline=False)
+    
+    # Test if we can reach Discord's API
+    try:
+        response = requests.get("https://discord.com/api/v9/gateway", timeout=5)
+        if response.status_code == 200:
+            embed.add_field(name="Discord API", value="✅ Reachable", inline=False)
+        else:
+            embed.add_field(name="Discord API", value=f"⚠️ Status: {response.status_code}", inline=False)
+    except Exception as api_e:
+        embed.add_field(name="Discord API", value=f"❌ Unreachable: {str(api_e)}", inline=False)
+    
+    # Check Windows Firewall status (if possible)
+    try:
+        result = subprocess.run(['netsh', 'advfirewall', 'show', 'allprofiles', 'state'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            if "ON" in result.stdout:
+                embed.add_field(name="Windows Firewall", value="🟡 Enabled (may block UDP)", inline=False)
+            else:
+                embed.add_field(name="Windows Firewall", value="✅ Disabled", inline=False)
+        else:
+            embed.add_field(name="Windows Firewall", value="❓ Cannot determine status", inline=False)
+    except Exception:
+        embed.add_field(name="Windows Firewall", value="❓ Cannot check", inline=False)
+    
+    # Voice connection troubleshooting tips
+    tips = [
+        "🔥 **Try temporarily disabling Windows Firewall**",
+        "🌐 **Check if other Discord bots work on your network**", 
+        "📡 **Try using a VPN to test if it's ISP-related**",
+        "🔄 **Restart your router/modem**",
+        "⚙️ **Check Windows Defender settings**"
+    ]
+    
+    embed.add_field(name="Troubleshooting Tips", value="\n".join(tips), inline=False)
+    
+    await ctx.send(embed=embed)
 
 # Run the bot
 if __name__ == "__main__":
