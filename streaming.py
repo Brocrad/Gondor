@@ -53,6 +53,9 @@ PLAYLIST_DIR.mkdir(exist_ok=True)
 # Playlist queue management with smart features
 playlist_queues = {}  # {guild_id: {"playlist_name": str, "songs": list, "original_songs": list, "current_index": int, "shuffle": bool, "loop_mode": str, "total_songs": int}}
 
+# Smart queue system for individual !play songs
+song_queues = {}  # {guild_id: [{"title": str, "file_path": str, "duration": int, "requested_by": User, "cached": bool}, ...]}
+
 class SimpleAudioSource(discord.PCMVolumeTransformer):
     """Simple audio source that just streams local files"""
     def __init__(self, source, *, title="Unknown", duration=0, file_path=None):
@@ -82,6 +85,99 @@ def queue_cleanup_request(file_path):
     except Exception as e:
         print(f"⚠️ Failed to queue cleanup: {e}")
 
+# Song queue management functions
+def add_to_song_queue(guild_id, song_info):
+    """Add a song to the guild's queue"""
+    if guild_id not in song_queues:
+        song_queues[guild_id] = []
+    song_queues[guild_id].append(song_info)
+    print(f"📋 Added '{song_info['title']}' to queue. Position: {len(song_queues[guild_id])}")
+
+def get_next_queued_song(guild_id):
+    """Get the next song from the queue"""
+    if guild_id in song_queues and song_queues[guild_id]:
+        return song_queues[guild_id].pop(0)
+    return None
+
+def clear_song_queue(guild_id):
+    """Clear all songs from the queue"""
+    if guild_id in song_queues:
+        count = len(song_queues[guild_id])
+        song_queues[guild_id].clear()
+        return count
+    return 0
+
+def get_queue_info(guild_id):
+    """Get information about the current queue"""
+    if guild_id not in song_queues:
+        return []
+    return song_queues[guild_id]
+
+async def play_next_queued_song(guild_id):
+    """Play the next song in the queue"""
+    guild = bot.get_guild(guild_id)
+    if not guild or not guild.voice_client:
+        return
+    
+    voice_client = guild.voice_client
+    next_song = get_next_queued_song(guild_id)
+    
+    if not next_song:
+        print(f"📋 Queue empty for guild {guild_id}")
+        return
+    
+    print(f"🎵 Playing next queued song: {next_song['title']}")
+    
+    try:
+        # Create audio source
+        audio_path = str(next_song['file_path']).replace('\\', '/')
+        source = discord.FFmpegPCMAudio(audio_path, **ffmpeg_options)
+        
+        audio_source = SimpleAudioSource(
+            source, 
+            title=next_song['title'],
+            duration=next_song['duration'],
+            file_path=next_song['file_path']
+        )
+        
+        current_sources[guild_id] = audio_source
+        
+        # Play the song
+        voice_client.play(audio_source, after=lambda e: after_playing(e, guild_id))
+        
+        # Send notification
+        channels = [channel for channel in guild.text_channels if channel.permissions_for(guild.me).send_messages]
+        if channels:
+            embed = discord.Embed(
+                title="🎵 Now Playing (from queue)",
+                description=f"**{next_song['title']}**",
+                color=0x9c27b0
+            )
+            embed.add_field(
+                name="Requested by", 
+                value=next_song['requested_by'].mention, 
+                inline=True
+            )
+            embed.add_field(
+                name="Queue Position", 
+                value=f"📊 Was #{1} in queue", 
+                inline=True
+            )
+            if next_song['duration']:
+                duration_str = f"{next_song['duration']//60}:{next_song['duration']%60:02d}"
+                embed.add_field(name="Duration", value=f"⏱️ {duration_str}", inline=True)
+            
+            remaining = len(song_queues.get(guild_id, []))
+            if remaining > 0:
+                embed.set_footer(text=f"{remaining} songs remaining in queue")
+            
+            await channels[0].send(embed=embed)
+            
+    except Exception as e:
+        print(f"❌ Error playing queued song: {e}")
+        # Try to play the next song in queue
+        await play_next_queued_song(guild_id)
+
 def after_playing(error, guild_id):
     """Callback after audio finishes - handles cleanup and playlist continuation"""
     if error:
@@ -99,7 +195,17 @@ def after_playing(error, guild_id):
     
     current_sources.pop(guild_id, None)
     
-    # Check if there's a playlist active and play next song
+    # Check for queued songs first (from !play commands)
+    if guild_id in song_queues and song_queues[guild_id]:
+        print(f"📋 Found {len(song_queues[guild_id])} songs in queue")
+        # Schedule the next queued song
+        asyncio.run_coroutine_threadsafe(
+            play_next_queued_song(guild_id), 
+            bot.loop
+        )
+        return
+    
+    # If no queued songs, check if there's a playlist active and play next song
     playlist_status = PlaylistManager.get_playlist_status(guild_id)
     if playlist_status["status"] == "active":
         # Schedule the next song in the bot's event loop
@@ -746,34 +852,36 @@ def check_processing_result(request_id):
 
 @bot.command(name="summon", help="Summon the bot to your voice channel")
 async def summon(ctx):
-    """Connect to user's voice channel"""
-    if not ctx.author.voice:
-        await ctx.send("❌ You need to be in a voice channel!")
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("❌ You need to be in a voice channel to summon me!")
         return
-    
+
     channel = ctx.author.voice.channel
-    
-    try:
-        if ctx.guild.voice_client is None:
-            voice_client = await channel.connect()
-            await ctx.send(f"🔊 **Connected** to `{channel.name}`")
-            print(f"🔊 Connected to: {channel.name}")
-        elif ctx.guild.voice_client.channel != channel:
-            await ctx.guild.voice_client.move_to(channel)
-            await ctx.send(f"🔊 **Moved** to `{channel.name}`")
+    voice_client = ctx.guild.voice_client
+
+    if voice_client:
+        if voice_client.channel == channel:
+            await ctx.send(f"🔊 I'm already connected to **{channel.name}**!")
+            return
         else:
-            await ctx.send(f"✅ Already in `{channel.name}`!")
-            
+            await voice_client.disconnect()
+
+    try:
+        await ctx.send(f"🎵 Connecting to **{channel.name}**...")
+        voice_client = await channel.connect()
+        await ctx.send(f"🔊 Connected to **{channel.name}**!")
     except Exception as e:
-        await ctx.send(f"❌ Connection failed: {str(e)}")
+        await ctx.send(f"❌ Failed to connect to voice channel: {e}")
 
 @bot.command(name="play", help="Stream audio content")
 async def play(ctx, *, query: str):
     """Stream audio content from query"""
-    
-    if not ctx.guild.voice_client:
-        await ctx.send("❌ I need to be summoned first! Use `!summon`")
+        
+    voice_client = ctx.guild.voice_client
+    if not voice_client or not voice_client.is_connected():
+        await ctx.send("❌ I'm not connected to a voice channel! Use `!summon` first.")
         return
+
     
     try:
         # Process audio request
@@ -817,13 +925,40 @@ async def play(ctx, *, query: str):
             await processing_msg.edit(content=f"❌ **Error:** File not found")
             return
         
-        # Stop current playback
+        # Check if something is already playing - if so, queue this song
         voice_client = ctx.guild.voice_client
         if voice_client.is_playing() or voice_client.is_paused():
-            voice_client.stop()
-            await asyncio.sleep(0.5)
+            # Add to queue instead of interrupting current playback
+            song_info = {
+                'title': title,
+                'file_path': file_path,
+                'duration': duration,
+                'requested_by': ctx.author,
+                'cached': cached
+            }
+            add_to_song_queue(ctx.guild.id, song_info)
+            
+            # Show queue position
+            queue_position = len(song_queues[ctx.guild.id])
+            duration_str = f" • {duration//60}:{duration%60:02d}" if duration else ""
+            cached_str = " (cached)" if cached else ""
+            
+            embed = discord.Embed(
+                title="📋 Added to Queue",
+                description=f"**{title}**{duration_str}{cached_str}",
+                color=0x3498db
+            )
+            embed.add_field(name="Position", value=f"#{queue_position}", inline=True)
+            embed.add_field(name="Requested by", value=ctx.author.mention, inline=True)
+            
+            queue_info = get_queue_info(ctx.guild.id)
+            if len(queue_info) > 1:
+                embed.set_footer(text=f"{len(queue_info)} songs in queue")
+            
+            await processing_msg.edit(content=None, embed=embed)
+            return
         
-        # Stream the audio file
+        # Stream the audio file (nothing is currently playing)
         print(f"🎵 Streaming file: {os.path.basename(file_path)}")
         
         # Use FFmpegPCMAudio - Discord.py handles Opus encoding internally
@@ -894,6 +1029,52 @@ async def resume(ctx):
     else:
         await ctx.send("❌ Nothing paused")
 
+@bot.command(name="queue", help="Show current song queue")
+async def show_queue(ctx):
+    """Show the current song queue"""
+    queue_info = get_queue_info(ctx.guild.id)
+    
+    if not queue_info:
+        await ctx.send("📋 The queue is empty!")
+        return
+    
+    embed = discord.Embed(
+        title="📋 Current Song Queue",
+        description=f"{len(queue_info)} songs in queue",
+        color=0x3498db
+    )
+    
+    # Show up to 10 songs in queue
+    for i, song in enumerate(queue_info[:10], 1):
+        duration_str = f" • {song['duration']//60}:{song['duration']%60:02d}" if song['duration'] else ""
+        cached_str = " (cached)" if song['cached'] else ""
+        
+        embed.add_field(
+            name=f"{i}. {song['title']}{duration_str}{cached_str}",
+            value=f"Requested by {song['requested_by'].mention}",
+            inline=False
+        )
+    
+    if len(queue_info) > 10:
+        embed.set_footer(text=f"... and {len(queue_info) - 10} more songs")
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name="clearqueue", help="Clear the song queue")
+async def clear_queue(ctx):
+    """Clear all songs from the queue"""
+    count = clear_song_queue(ctx.guild.id)
+    
+    if count == 0:
+        await ctx.send("📋 The queue is already empty!")
+    else:
+        embed = discord.Embed(
+            title="🗑️ Queue Cleared",
+            description=f"Removed {count} songs from the queue",
+            color=0xff9900
+        )
+        await ctx.send(embed=embed)
+
 @bot.command(name="stop", help="Stop audio stream")
 async def stop(ctx):
     """Stop current stream"""
@@ -906,7 +1087,13 @@ async def stop(ctx):
             
             ctx.guild.voice_client.stop()
             current_sources.pop(ctx.guild.id, None)
-            await ctx.send("⏹️ **Stopped**")
+            
+            # Also clear the song queue when stopping
+            queue_count = clear_song_queue(ctx.guild.id)
+            if queue_count > 0:
+                await ctx.send(f"⏹️ **Stopped** (cleared {queue_count} queued songs)")
+            else:
+                await ctx.send("⏹️ **Stopped**")
         else:
             await ctx.send("❌ Nothing playing")
     else:
@@ -943,10 +1130,12 @@ async def show_commands(ctx):
     embed.add_field(
         name="🎶 Music Commands (Require !summon first)",
         value=(
-            "`!play <search or url>` - Stream audio content\n"
+            "`!play <search or url>` - Stream audio content (auto-queues if busy)\n"
             "`!pause` - Pause the current song\n"
             "`!resume` - Resume playback\n"
-            "`!stop` - Stop current song (bot stays in channel)"
+            "`!stop` - Stop current song (bot stays in channel)\n"
+            "`!queue` - Show current song queue 📋\n"
+            "`!clearqueue` - Clear all queued songs 🗑️"
         ),
         inline=False
     )

@@ -1,0 +1,42 @@
+{
+  "name": "groovy",
+  "created": 1754444375.143871,
+  "files": [
+    {
+      "title": "Clouds",
+      "audio_file": "playlists\\groovy\\Clouds_1754444440_79bc7149.webm",
+      "metadata_file": "playlists\\groovy\\Clouds_1754444440_79bc7149.json",
+      "duration": 187,
+      "added": 1754444440.0495117
+    },
+    {
+      "title": "Moses Yoofee Trio - BOND",
+      "audio_file": "playlists\\groovy\\Moses Yoofee Trio - BOND_1754444496_d176c0d9.webm",
+      "metadata_file": "playlists\\groovy\\Moses Yoofee Trio - BOND_1754444496_d176c0d9.json",
+      "duration": 221,
+      "added": 1754444496.2829618
+    },
+    {
+      "title": "C\u00f4te D'ivoire",
+      "audio_file": "playlists\\groovy\\C\u00f4te Divoire_1754444922_d6e8cf09.webm",
+      "metadata_file": "playlists\\groovy\\C\u00f4te Divoire_1754444922_d6e8cf09.json",
+      "duration": 205,
+      "added": 1754444922.0084162
+    },
+    {
+      "title": "Jasper Garnet",
+      "audio_file": "playlists\\groovy\\Jasper Garnet_1754445417_a07e9547.webm",
+      "metadata_file": "playlists\\groovy\\Jasper Garnet_1754445417_a07e9547.json",
+      "duration": 436,
+      "added": 1754445417.9559653
+    },
+    {
+      "title": "C#M.",
+      "audio_file": "playlists\\groovy\\CM_1754445466_0cfa3429.webm",
+      "metadata_file": "playlists\\groovy\\CM_1754445466_0cfa3429.json",
+      "duration": 114,
+      "added": 1754445466.929577
+    }
+  ],
+  "total_duration": 1163
+}
