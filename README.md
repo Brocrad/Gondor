@@ -99,6 +99,6 @@ This Python-based music bot is designed to be:
 
 Enjoy your working Discord music bot! 🎤🤖
 🚀 To Run Your Bot in the Future:
-1. Navigate to your project directory: cd <your directory path>
+1. Navigate to your project directory: cd `dir here`
 2. Activate virtual environment: & .venv/Scripts/Activate.ps1
 3. Run the bot: python music_bot.py
