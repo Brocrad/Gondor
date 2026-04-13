@@ -14,7 +14,32 @@ import asyncio
 import signal
 import sys
 import threading
+import atexit
 from pathlib import Path
+
+# Windows: allow emoji in print() (same issue as streaming bot)
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def _youtube_ytdlp_opts():
+    """Options that reduce YouTube 403 / SABR / missing-URL issues vs default web client."""
+    return {
+        'extractor_args': {
+            'youtube': {
+                # android/ios often avoid web-only SABR + JS player requirements
+                'player_client': ['android', 'web', 'ios'],
+            },
+        },
+        'retries': 5,
+        'fragment_retries': 5,
+        'noplaylist': True,
+    }
+
 
 class SmartMediaCleaner:
     """Air-gapped media cleanup - Discord never sees this"""
@@ -188,27 +213,71 @@ class SmartMediaCleaner:
             print(f"⚠️ Background cleanup error: {e}")
 
 class AudioProcessor:
-    def __init__(self):
+    def __init__(self, quality_mode='optimized'):
         # ALL the YouTube/music processing happens HERE - not in Discord bot
-        self.audio_format_options = {
-            'format': 'bestaudio[acodec^=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
-            'restrictfilenames': True,
-            'noplaylist': True,
-            'nocheckcertificate': True,
-            'ignoreerrors': False,
-            'logtostderr': False,
-            'quiet': True,
-            'no_warnings': True,
-            'default_search': 'auto',
-            'socket_timeout': 60,
-            'retries': 3,
-            'fragment_retries': 3,
-            'prefer_ffmpeg': True,
-            'keepvideo': False,
-            'extractaudio': True,
-            'audioformat': 'best',
-            'audioquality': '0',
-        }
+        
+        # Quality presets
+        if quality_mode == 'optimized':
+            # Smallest files for streaming (128kbps MP3)
+            self.audio_format_options = {
+                **_youtube_ytdlp_opts(),
+                'format': 'worstaudio/worst',
+                'quiet': True,
+                'no_warnings': True,
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'audioquality': '5',  # Medium quality
+                'socket_timeout': 45,
+                'prefer_ffmpeg': True,
+                'keepvideo': False,
+                'postprocessor_args': ['-ar', '44100', '-ac', '2', '-b:a', '128k'],
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'referer': 'https://www.youtube.com/',
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+            }
+            print("🎯 Audio quality: Optimized for streaming (128kbps MP3)")
+            
+        elif quality_mode == 'balanced':
+            # Balanced quality/size (192kbps)
+            self.audio_format_options = {
+                **_youtube_ytdlp_opts(),
+                'format': 'bestaudio[abr<=192]/bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'audioquality': '3',
+                'socket_timeout': 45,
+                'prefer_ffmpeg': True,
+                'keepvideo': False,
+                'postprocessor_args': ['-ar', '44100', '-ac', '2', '-b:a', '192k'],
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'referer': 'https://www.youtube.com/',
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+            }
+            print("⚖️ Audio quality: Balanced (192kbps MP3)")
+            
+        else:  # high quality
+            # Best quality available
+            self.audio_format_options = {
+                **_youtube_ytdlp_opts(),
+                'format': 'bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'extractaudio': True,
+                'audioformat': 'best',
+                'audioquality': '0',
+                'socket_timeout': 45,
+                'prefer_ffmpeg': True,
+                'keepvideo': False,
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'referer': 'https://www.youtube.com/',
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+            }
+            print("🔊 Audio quality: High quality (best available)")
         
         # Setup directories
         self.media_dir = Path("media_library")
@@ -219,6 +288,63 @@ class AudioProcessor:
         # Initialize processor with memory management
         self.processor = yt_dlp.YoutubeDL(self.audio_format_options)
         self.request_count = 0  # Track processed requests for memory management
+    
+    def check_network_connectivity(self):
+        """Check if we can reach YouTube and other essential services"""
+        import socket
+        import urllib.request
+        
+        # Test DNS resolution first
+        try:
+            socket.gethostbyname('www.google.com')
+            print("✅ DNS resolution working")
+        except socket.gaierror as e:
+            print(f"❌ DNS resolution failed: {e}")
+            return False
+        
+        # Test basic HTTP connectivity
+        test_urls = [
+            'https://www.google.com',
+            'https://www.youtube.com',
+            'https://httpbin.org/get'
+        ]
+        
+        for url in test_urls:
+            try:
+                req = urllib.request.Request(url, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    if response.status == 200:
+                        print(f"✅ Can reach {url}")
+                        return True
+            except Exception as e:
+                print(f"⚠️ Cannot reach {url}: {e}")
+                continue
+        
+        print("❌ No network connectivity detected")
+        
+        # Try to flush DNS cache as last resort
+        try:
+            print("🔄 Attempting DNS cache flush...")
+            import subprocess
+            result = subprocess.run(['ipconfig', '/flushdns'], 
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                print("✅ DNS cache flushed, retrying connectivity...")
+                # Try one more time after DNS flush
+                try:
+                    socket.gethostbyname('www.google.com')
+                    print("✅ DNS resolution working after flush")
+                    return True
+                except:
+                    pass
+            else:
+                print("⚠️ DNS flush failed")
+        except Exception as e:
+            print(f"⚠️ Could not flush DNS: {e}")
+        
+        return False
         
         # Initialize air-gapped cleanup system
         self.cleaner = SmartMediaCleaner(
@@ -288,20 +414,79 @@ class AudioProcessor:
                         'cached': True
                     }
                 
-                # Download with generic filename
-                download_opts = {
-                    **self.audio_format_options,
-                    'outtmpl': str(self.media_dir / f"{safe_filename}.%(ext)s")
-                }
+                # Simple network test
+                print("🌐 Testing basic connectivity...")
+                try:
+                    import socket
+                    socket.gethostbyname('www.google.com')
+                    print("✅ Network connectivity OK")
+                except Exception as e:
+                    print(f"⚠️ Network issue detected: {e}")
+                    # Continue anyway - let yt-dlp handle it
                 
-                print(f"⬇️ Downloading to: {safe_filename}.xxx")
+                # Simple download approach - use what works
+                print(f"⬇️ Downloading: {title}")
+                print(f"⬇️ File: {safe_filename}.xxx")
                 
-                with yt_dlp.YoutubeDL(download_opts) as downloader:
-                    downloader.download([video_info['webpage_url']])
+                try:
+                    download_opts = {
+                        **self.audio_format_options,
+                        'outtmpl': str(self.media_dir / f"{safe_filename}.%(ext)s")
+                    }
+                    
+                    with yt_dlp.YoutubeDL(download_opts) as downloader:
+                        downloader.download([video_info['webpage_url']])
+                    
+                    print("✅ Download completed successfully")
+                    
+                except Exception as e:
+                    print(f"❌ Download failed: {e}")
+                    try:
+                        print("🔄 Retrying with tv_embedded client...")
+                        download_opts_retry = {
+                            **self.audio_format_options,
+                            'outtmpl': str(self.media_dir / f"{safe_filename}.%(ext)s"),
+                            'extractor_args': {
+                                'youtube': {
+                                    'player_client': ['tv_embedded', 'android', 'ios'],
+                                },
+                            },
+                        }
+                        with yt_dlp.YoutubeDL(download_opts_retry) as downloader:
+                            downloader.download([video_info['webpage_url']])
+                        print("✅ Download completed successfully (retry)")
+                    except Exception as e_retry:
+                        print(f"❌ Retry failed: {e_retry}")
+                        try:
+                            print("🔄 Trying alternative search approach...")
+                            search_opts = {
+                                **_youtube_ytdlp_opts(),
+                                'format': 'worstaudio/worst',  # Smallest file
+                                'quiet': True,
+                                'extractaudio': True,
+                                'audioformat': 'mp3',
+                                'audioquality': '5',  # Medium quality
+                                'outtmpl': str(self.media_dir / f"{safe_filename}.%(ext)s"),
+                                'postprocessor_args': ['-ar', '44100', '-ac', '2', '-b:a', '128k'],
+                                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                'referer': 'https://www.youtube.com/',
+                                'nocheckcertificate': True,
+                                'ignoreerrors': False,
+                            }
+                            search_query = f"ytsearch1:{query}"
+                            with yt_dlp.YoutubeDL(search_opts) as downloader:
+                                downloader.download([search_query])
+                            print("✅ Alternative search succeeded")
+                        except Exception as e2:
+                            print(f"❌ Alternative search also failed: {e2}")
+                            return {
+                                'status': 'error',
+                                'message': f'Download failed: {str(e)} / Retry: {str(e_retry)} / Alt: {str(e2)}'
+                            }
                 
-                # Find the downloaded file
+                # Find the downloaded file (check for optimized formats first)
                 downloaded_file = None
-                for ext in ['.webm', '.m4a', '.mp4', '.opus']:
+                for ext in ['.mp3', '.webm', '.m4a', '.mp4', '.opus']:
                     potential_path = self.media_dir / f"{safe_filename}{ext}"
                     if potential_path.exists():
                         downloaded_file = potential_path
@@ -309,7 +494,15 @@ class AudioProcessor:
                 
                 if downloaded_file and downloaded_file.exists():
                     file_size = downloaded_file.stat().st_size
-                    print(f"✅ Downloaded: {downloaded_file.name} ({file_size/1024/1024:.2f}MB)")
+                    size_mb = file_size/1024/1024
+                    
+                    # Show optimized size
+                    if size_mb < 3:
+                        print(f"✅ Downloaded (optimized): {downloaded_file.name} ({size_mb:.2f}MB) 🎯")
+                    elif size_mb < 5:
+                        print(f"✅ Downloaded: {downloaded_file.name} ({size_mb:.2f}MB)")
+                    else:
+                        print(f"✅ Downloaded (large): {downloaded_file.name} ({size_mb:.2f}MB) ⚠️")
                     
                     # Save metadata separately
                     metadata = {
@@ -326,9 +519,9 @@ class AudioProcessor:
                         json.dump(metadata, f, indent=2)
                     
                     # Quick cleanup after download (remove any immediate duplicates)
-                    duplicate_count = len(self.cleaner.cleanup_duplicates())
-                    if duplicate_count > 0:
-                        print(f"🧹 Removed {duplicate_count} duplicate(s) after download")
+                    # duplicate_count = len(self.cleaner.cleanup_duplicates())
+                    # if duplicate_count > 0:
+                    #     print(f"🧹 Removed {duplicate_count} duplicate(s) after download")
                     
                     return {
                         'status': 'success',
@@ -355,7 +548,7 @@ class AudioProcessor:
                     # Run cleanup every 6 hours
                     time.sleep(6 * 3600)  # 6 hours
                     print("🕐 Running scheduled cleanup...")
-                    self.cleaner.run_smart_cleanup()
+                    # self.cleaner.run_smart_cleanup()
                 except Exception as e:
                     print(f"⚠️ Scheduled cleanup error: {e}")
         
@@ -494,7 +687,60 @@ def signal_handler(signum, frame):
     print("\n🛑 Received shutdown signal")
     sys.exit(0)
 
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import subprocess as sp
+            r = sp.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return str(pid) in (r.stdout or "")
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _exit_if_duplicate_processor():
+    """Only one queue consumer; if another is alive, exit quietly so a second bot can share it."""
+    queue_dir = Path("request_queue")
+    queue_dir.mkdir(exist_ok=True)
+    pid_file = queue_dir / ".audio_processor.pid"
+    if pid_file.exists():
+        try:
+            old = int(pid_file.read_text().strip())
+            if _pid_exists(old):
+                print(f"Audio processor already running (PID {old}) — exiting")
+                sys.exit(0)
+        except (ValueError, OSError):
+            pass
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+    pid_file.write_text(str(os.getpid()))
+
+    def _unlink_pid():
+        try:
+            if pid_file.exists() and pid_file.read_text().strip() == str(os.getpid()):
+                pid_file.unlink()
+        except OSError:
+            pass
+
+    atexit.register(_unlink_pid)
+
+
 if __name__ == "__main__":
+    _exit_if_duplicate_processor()
+
     # Setup signal handling
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

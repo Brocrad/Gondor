@@ -16,6 +16,14 @@ class AudioSystemManager:
         self.processor_process = None
         self.bot_process = None
         
+        # Auto-restart configuration
+        self.restart_count = 0
+        self.max_restarts = 10
+        self.restart_delay = 5
+        self.restart_cooldown = 300  # 5 minutes
+        self.last_restart_time = 0
+        self.auto_restart_enabled = True
+        
     def start_background_processor(self):
         """Start the background audio processing service"""
         print("🎵 Starting audio processing service...")
@@ -71,12 +79,7 @@ class AudioSystemManager:
         print("🚀 Starting Audio System")
         print("=" * 50)
         
-        # Start background processor first
-        if not self.start_background_processor():
-            print("❌ Failed to start background processor")
-            return False
-        
-        # Start Discord bot
+        # Discord bot spawns audio_processor_service.py itself (shared request_queue cwd)
         if not self.start_discord_bot():
             print("❌ Failed to start Discord bot")
             self.stop_system()
@@ -153,23 +156,92 @@ class AudioSystemManager:
                 except:
                     pass
     
+    def log_with_timestamp(self, message):
+        """Log message with timestamp"""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [SYSTEM] {message}")
+    
+    def reset_restart_counter(self):
+        """Reset restart counter if cooldown period has passed"""
+        current_time = time.time()
+        if current_time - self.last_restart_time > self.restart_cooldown:
+            if self.restart_count > 0:
+                self.log_with_timestamp(f"Cooldown period passed, resetting restart counter (was {self.restart_count})")
+            self.restart_count = 0
+    
+    def can_restart(self):
+        """Check if system can be restarted"""
+        self.reset_restart_counter()
+        return self.auto_restart_enabled and self.restart_count < self.max_restarts
+    
+    def restart_discord_bot(self):
+        """Restart the Discord bot component"""
+        if not self.can_restart():
+            self.log_with_timestamp(f"❌ Maximum restart attempts ({self.max_restarts}) reached!")
+            self.log_with_timestamp(f"⏳ Waiting {self.restart_cooldown} seconds before allowing restarts...")
+            return False
+        
+        self.log_with_timestamp("🔄 Restarting Discord streaming service...")
+        
+        # Stop current bot process
+        if self.bot_process:
+            try:
+                self.bot_process.terminate()
+                self.bot_process.wait(timeout=5)
+            except:
+                try:
+                    self.bot_process.kill()
+                except:
+                    pass
+        
+        # Increment restart counter
+        self.restart_count += 1
+        self.last_restart_time = time.time()
+        
+        self.log_with_timestamp(f"🔄 Bot restart #{self.restart_count}")
+        
+        if self.restart_count < self.max_restarts:
+            self.log_with_timestamp(f"⏳ Waiting {self.restart_delay} seconds before restart...")
+            time.sleep(self.restart_delay)
+        
+        # Start new bot process
+        return self.start_discord_bot()
+    
     def monitor_system(self):
-        """Monitor both services"""
+        """Monitor both services with auto-restart capability"""
+        self.log_with_timestamp("🔍 System monitoring started")
+        self.log_with_timestamp(f"🔄 Auto-restart: {'Enabled' if self.auto_restart_enabled else 'Disabled'}")
+        self.log_with_timestamp(f"📊 Max restarts: {self.max_restarts}, Restart delay: {self.restart_delay}s")
+        
         try:
             while True:
-                # Check if processes are still running
+                # Check background processor
                 if self.processor_process and self.processor_process.poll() is not None:
-                    print("❌ Background processor died")
-                    break
+                    self.log_with_timestamp("❌ Background processor died")
+                    if self.auto_restart_enabled:
+                        self.log_with_timestamp("🔄 Restarting background processor...")
+                        if not self.start_background_processor():
+                            self.log_with_timestamp("❌ Failed to restart background processor")
+                            break
+                    else:
+                        break
                 
+                # Check Discord bot
                 if self.bot_process and self.bot_process.poll() is not None:
-                    print("❌ Discord bot died")
-                    break
+                    exit_code = self.bot_process.returncode
+                    self.log_with_timestamp(f"❌ Discord bot died (exit code: {exit_code})")
+                    
+                    if self.auto_restart_enabled:
+                        if not self.restart_discord_bot():
+                            self.log_with_timestamp("❌ Failed to restart Discord bot")
+                            break
+                    else:
+                        break
                 
                 time.sleep(5)
                 
         except KeyboardInterrupt:
-            print("\n🛑 Shutdown requested")
+            self.log_with_timestamp("🛑 Shutdown requested by user")
         finally:
             self.stop_system()
 
@@ -184,14 +256,40 @@ def main():
     
     manager = AudioSystemManager()
     
+    # Parse command line arguments
     if len(sys.argv) > 1:
-        if sys.argv[1] == "test":
-            # Test mode - just run background processor with a test query
-            print("🧪 Test Mode: Testing background processor only")
-            test_query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else "never gonna give you up"
-            
-            os.system(f'python audio_processor_service.py "{test_query}"')
-            return
+        for arg in sys.argv[1:]:
+            if arg == "test":
+                # Test mode - just run background processor with a test query
+                print("🧪 Test Mode: Testing background processor only")
+                test_query = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else "never gonna give you up"
+                os.system(f'python audio_processor_service.py "{test_query}"')
+                return
+            elif arg == "--no-restart":
+                manager.auto_restart_enabled = False
+                print("🔄 Auto-restart disabled")
+            elif arg == "--max-restarts":
+                try:
+                    manager.max_restarts = int(sys.argv[sys.argv.index(arg) + 1])
+                    print(f"📊 Max restarts set to: {manager.max_restarts}")
+                except (IndexError, ValueError):
+                    print("⚠️ Invalid max-restarts value, using default (10)")
+            elif arg == "--restart-delay":
+                try:
+                    manager.restart_delay = int(sys.argv[sys.argv.index(arg) + 1])
+                    print(f"⏱️ Restart delay set to: {manager.restart_delay}s")
+                except (IndexError, ValueError):
+                    print("⚠️ Invalid restart-delay value, using default (5s)")
+    
+    # Show startup configuration
+    print("🚀 Starting Audio System")
+    print("=" * 50)
+    print(f"🔄 Auto-restart: {'Enabled' if manager.auto_restart_enabled else 'Disabled'}")
+    if manager.auto_restart_enabled:
+        print(f"📊 Max restart attempts: {manager.max_restarts}")
+        print(f"⏱️ Restart delay: {manager.restart_delay} seconds")
+        print(f"❄️ Restart cooldown: {manager.restart_cooldown} seconds")
+    print("=" * 50)
     
     # Start complete system
     if manager.start_system():

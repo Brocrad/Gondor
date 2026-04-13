@@ -186,7 +186,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     
                     if temp_file and os.path.exists(temp_file):
                         print(f"✅ Pre-buffered: {os.path.basename(temp_file)}")
-                        source = discord.FFmpegPCMAudio(temp_file, **ffmpeg_options_file)
+                        ffmpeg_path = r"C:\Users\Jasper\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0-essentials_build\bin\ffmpeg.exe"
+                        source = discord.FFmpegPCMAudio(temp_file, executable=ffmpeg_path, **ffmpeg_options_file)
                         return cls(source, data=data, temp_file=temp_file)
                         
                 except Exception as prebuffer_error:
@@ -197,7 +198,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
             
             # Get the best audio URL with retries
             audio_url = await cls._get_best_audio_url(data, loop)
-            source = discord.FFmpegPCMAudio(audio_url, **ffmpeg_options_stream)
+            ffmpeg_path = r"C:\Users\Jasper\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0-essentials_build\bin\ffmpeg.exe"
+            source = discord.FFmpegPCMAudio(audio_url, executable=ffmpeg_path, **ffmpeg_options_stream)
             return cls(source, data=data)
             
         except Exception as e:
