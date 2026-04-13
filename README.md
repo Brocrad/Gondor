@@ -44,23 +44,38 @@ A reliable Discord music bot that plays music from YouTube using the power of Py
 
 ## 🎮 Commands
 
-All commands are slash commands:
+⚠️ **Important:** Use `!summon` first to bring the bot to your voice channel!
 
-- `/play <search or url>` - Play music from YouTube
-- `/summon` - Summon the bot to your voice channel
-- `/pause` - Pause the current song
-- `/resume` - Resume playback
-- `/stop` - Stop music and disconnect
+All commands use the `!` prefix:
+
+### 🎶 Music Commands (Require !summon first):
+- `!play <search or url>` - Play music from YouTube
+- `!pause` - Pause the current song
+- `!resume` - Resume playback
+- `!stop` - Stop the current song (bot stays in channel)
+
+### 🔧 Control Commands:
+- `!summon` - Summon the bot to your voice channel
+- `!kill` - Disconnect the bot from voice channel
+- `!commands` - Show all available commands
 
 ## 💡 Usage Examples
 
 ```
-/play Never Gonna Give You Up
-/play The Boys Are Back In Town
-/play https://www.youtube.com/watch?v=dQw4w9WgXcQ
-/pause
-/resume
-/stop
+# First, summon the bot to your voice channel
+!summon
+
+# Then you can use music commands
+!play Never Gonna Give You Up
+!play The Boys Are Back In Town
+!play https://www.youtube.com/watch?v=dQw4w9WgXcQ
+!pause
+!resume
+!stop
+
+# Other commands
+!kill      # Disconnect bot completely
+!commands  # Show all commands
 ```
 
 ## 🔧 Why Python?

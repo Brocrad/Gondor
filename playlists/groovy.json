@@ -1,0 +1,21 @@
+{
+  "name": "groovy",
+  "created": 1754444375.143871,
+  "files": [
+    {
+      "title": "C#M.",
+      "audio_file": "playlists\\groovy\\CM_1756602178_c7ba5516.webm",
+      "metadata_file": "playlists\\groovy\\CM_1756602178_c7ba5516.json",
+      "duration": 114,
+      "added": 1756602178.8876724
+    },
+    {
+      "title": "Clouds",
+      "audio_file": "playlists\\groovy\\Clouds_1756602260_066830a5.webm",
+      "metadata_file": "playlists\\groovy\\Clouds_1756602260_066830a5.json",
+      "duration": 187,
+      "added": 1756602260.3056705
+    }
+  ],
+  "total_duration": 301
+}
